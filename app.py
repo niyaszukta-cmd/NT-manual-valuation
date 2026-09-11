@@ -3632,6 +3632,151 @@ def create_football_field_chart(method_values, current_price, blended=None):
     )
     return fig
 
+
+# ---------------------------------------------------------------------------
+# SHARED VALUATION PRESENTATION
+# ---------------------------------------------------------------------------
+# Used by BOTH the system (model) valuation and the manual valuation so the
+# two render identically and can be compared at a glance.
+# ---------------------------------------------------------------------------
+def recommendation_for_upside(upside):
+    """Map an upside % to the same card class / label / icon used everywhere."""
+    if upside is None:
+        return "rec-hold", "Insufficient Data", "❔"
+    if upside > 25:
+        return "rec-strong-buy", "Significantly Undervalued", "🚀"
+    if upside > 15:
+        return "rec-buy", "Undervalued", "✅"
+    if upside > 0:
+        return "rec-buy", "Fairly Valued", "📥"
+    if upside > -10:
+        return "rec-hold", "Slightly Overvalued", "⏸️"
+    return "rec-avoid", "Overvalued", "⚠️"
+
+
+def render_company_header(company, ticker, sector, industry):
+    st.markdown(f'''
+    <div class="company-header">
+        <div class="company-title">{company}</div>
+        <div class="company-info">
+            🏷️ {ticker} • 🏢 {sector} • 🏭 {industry}
+        </div>
+    </div>
+    ''', unsafe_allow_html=True)
+
+
+def render_fair_value_card(fair_value, price, upside, title="📊 Calculated Fair Value"):
+    arrow = "📈" if (upside or 0) > 0 else "📉"
+    up_txt = f"{upside:+.2f}% Potential" if upside is not None else "Upside unavailable"
+    st.markdown(f'''
+    <div class="fair-value-card">
+        <div class="fair-value-title">{title}</div>
+        <div class="fair-value-amount">₹{fair_value:,.2f}</div>
+        <div class="fair-value-details">
+            Current Price: ₹{price:,.2f}<br>
+            {arrow} {up_txt}
+        </div>
+    </div>
+    ''', unsafe_allow_html=True)
+
+
+def render_recommendation_card(upside):
+    cls, text, icon = recommendation_for_upside(upside)
+    ret = f"{upside:+.2f}%" if upside is not None else "N/A"
+    st.markdown(f'''
+    <div class="recommendation-card {cls}">
+        <h3>{icon} {text}</h3>
+        <p>Expected Return: {ret}</p>
+    </div>
+    ''', unsafe_allow_html=True)
+
+
+def render_metric_cards(items):
+    """items = [(icon, value, label), ...] rendered as the standard metric cards."""
+    if not items:
+        return
+    cols = st.columns(len(items))
+    for col, (icon, value, label) in zip(cols, items):
+        with col:
+            st.markdown(f'''
+            <div class="metric-card">
+                <div style="font-size: 1.5rem;">{icon}</div>
+                <div class="metric-value">{value}</div>
+                <div class="metric-label">{label}</div>
+            </div>
+            ''', unsafe_allow_html=True)
+
+
+def render_valuation_box(method_title, rows):
+    """rows = [(label, value_string), ...] in the standard valuation-box style."""
+    inner = "".join(
+        f'''<div class="valuation-row">
+            <span class="valuation-label">{lbl}</span>
+            <span class="valuation-value">{val}</span>
+        </div>''' for lbl, val in rows
+    )
+    st.markdown(f'''
+    <div class="valuation-box">
+        <div class="valuation-method">{method_title}</div>
+        {inner}
+    </div>
+    ''', unsafe_allow_html=True)
+
+
+def create_manual_comparison_chart(price, method_values, blended):
+    """
+    Price vs fair value bars for the manual valuation, styled to match the
+    system valuation's comparison chart.
+    """
+    rows = [(k, v) for k, v in method_values.items() if v and v > 0]
+    if not rows:
+        return None
+    rows.sort(key=lambda x: x[1])
+
+    labels = ["Current Price"] + [r[0] for r in rows] + ["Blended"]
+    values = [price] + [r[1] for r in rows] + [blended]
+    colors_list = (["#2563eb"]
+                   + ['#16a34a' if v > price else '#dc2626' for _, v in rows]
+                   + ["#f59e0b"])
+
+    fig = go.Figure(go.Bar(
+        x=labels, y=values, marker=dict(color=colors_list),
+        text=[f"₹{v:,.0f}" for v in values], textposition='outside',
+        hovertemplate="%{x}<br>₹%{y:,.2f}<extra></extra>"
+    ))
+    fig.update_layout(
+        title="Price vs Fair Value by Method",
+        yaxis_title="₹ per share",
+        height=420, showlegend=False,
+        margin=dict(l=10, r=10, t=60, b=90),
+        plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(tickangle=-35),
+    )
+    return fig
+
+
+def compute_system_valuation(ticker):
+    """
+    Run the app's own model on a ticker: the same path the screeners use.
+    Returns (vals, fundamentals, info, error_string).
+    """
+    try:
+        info, err = fetch_stock_data(ticker)
+    except Exception as e:
+        return None, None, None, str(e)[:120]
+    if err or not info:
+        return None, None, None, (err or "No data returned")
+
+    try:
+        si = get_stock_info(ticker)
+        industry = si['category'] if si else None
+        vals = calculate_valuations(info, industry)
+        fund = get_stock_fundamentals(ticker)
+        return vals, fund, info, None
+    except Exception as e:
+        return None, None, info, str(e)[:120]
+
+
 # ============================================================================
 # CHART GENERATION FUNCTIONS
 # ============================================================================
@@ -4910,6 +5055,11 @@ Thin coverage (under 3 articles) and stale news both scale the score down.
         if st.session_state.get('mv_prefill_note'):
             st.success(f"✅ {st.session_state.pop('mv_prefill_note')} — adjust anything below.")
 
+        # A system result belongs to one ticker; drop it when the selection moves.
+        _sysr = st.session_state.get('mv_system')
+        if _sysr and _sysr.get('ticker') and _sysr.get('ticker') != mv_ticker:
+            st.session_state.pop('mv_system', None)
+
         # ---- Benchmarks ------------------------------------------------------
         ind_key = None if mv_industry.startswith("—") else mv_industry
         try:
@@ -5022,11 +5172,19 @@ Thin coverage (under 3 articles) and stale news both scale the score down.
                        t_pe, t_fwd_pe, t_pb, t_peg, mv_disc, mv_div_g,
                        ind_key, mv_cap)
 
-        cb1, cb2 = st.columns([1, 3])
+        cb1, cb2, cb3 = st.columns([1, 1, 2])
         with cb1:
             calc_clicked = st.button("🧮 Calculate Fair Value", type="primary",
                                      use_container_width=True)
         with cb2:
+            sys_clicked = st.button("🤖 System Valuation", use_container_width=True,
+                                    disabled=not mv_ticker,
+                                    help=("Runs the app's own model on this ticker — "
+                                          "the same engine the screeners use — so you "
+                                          "can compare it against your own numbers.")
+                                         if mv_ticker else
+                                         "Pick a stock from the database to enable this")
+        with cb3:
             stored = st.session_state.get('mv_result')
             if stored and stored.get('sig') != current_sig:
                 st.warning("⚠️ Inputs have changed since the last calculation — "
@@ -5034,6 +5192,28 @@ Thin coverage (under 3 articles) and stale news both scale the score down.
             elif not stored:
                 st.caption("Fill in a price plus either an EPS or a book value, "
                            "then press Calculate.")
+
+        if sys_clicked and mv_ticker:
+            with st.spinner(f"Running the system model on {mv_ticker}..."):
+                s_vals, s_fund, s_info, s_err = compute_system_valuation(mv_ticker)
+            if s_err or not s_vals:
+                st.session_state['mv_system'] = {'error': s_err or "Model returned nothing"}
+            else:
+                s_fairs = [v for v in [s_vals.get('fair_value_pe'),
+                                       s_vals.get('fair_value_ev')] if v]
+                s_ups = [v for v in [s_vals.get('upside_pe'),
+                                     s_vals.get('upside_ev')] if v is not None]
+                st.session_state['mv_system'] = {
+                    'error': None,
+                    'vals': s_vals,
+                    'ticker': mv_ticker,
+                    'company': (s_info or {}).get('longName', mv_ticker),
+                    'sector': (s_info or {}).get('sector', 'N/A'),
+                    'industry': (s_info or {}).get('industry', 'N/A'),
+                    'fair_value': float(np.mean(s_fairs)) if s_fairs else None,
+                    'upside': float(np.mean(s_ups)) if s_ups else None,
+                }
+            st.rerun()
 
         if calc_clicked:
             ddm_ok = mv_div_g < mv_disc
@@ -5102,16 +5282,95 @@ Thin coverage (under 3 articles) and stale news both scale the score down.
                         "EPS with a target P/E, or a book value with a target P/B.")
             else:
                 upside = ((blended - r_price) / r_price * 100) if r_price else None
+                sysres = st.session_state.get('mv_system')
+                sys_ok = bool(sysres and not sysres.get('error')
+                              and sysres.get('ticker') == res['ticker'])
 
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Blended Fair Value", f"₹{blended:,.2f}",
-                          delta=f"{upside:+.1f}% vs LTP" if upside is not None else None)
-                m2.metric("Valuation Range",
-                          f"₹{stats['min']:,.0f} – ₹{stats['max']:,.0f}",
-                          delta=f"{stats['count']} methods", delta_color="off")
-                m3.metric("Median Method", f"₹{stats['median']:,.2f}")
-                m4.metric("Verdict",
-                          get_valuation_tag(upside) if upside is not None else "—")
+                # ---- Company header (same card as Individual Analysis) ----
+                _name = res['name'] or res['ticker']
+                if sys_ok:
+                    render_company_header(sysres['company'], res['ticker'],
+                                          sysres['sector'], sysres['industry'])
+                elif res['ticker'] != 'MANUAL':
+                    render_company_header(_name, res['ticker'],
+                                          get_sector_for_industry(res['industry']),
+                                          res['industry'])
+                else:
+                    render_company_header("Manual Valuation", "—",
+                                          get_sector_for_industry(res['industry']),
+                                          res['industry'])
+
+                # ---- Fair value + recommendation cards --------------------
+                hc1, hc2 = st.columns([2, 1])
+                with hc1:
+                    render_fair_value_card(blended, r_price, upside,
+                                           title="🧮 Manual Fair Value")
+                with hc2:
+                    render_recommendation_card(upside)
+
+                # ---- System vs Manual -------------------------------------
+                if sys_ok and sysres.get('fair_value'):
+                    st.markdown('<div class="section-header">🤖 System vs 🧮 Manual</div>',
+                                unsafe_allow_html=True)
+                    s_fv = sysres['fair_value']
+                    s_up = sysres['upside']
+                    gap = ((blended - s_fv) / s_fv * 100) if s_fv else None
+
+                    cmp_cols = st.columns(2)
+                    with cmp_cols[0]:
+                        render_fair_value_card(s_fv, r_price, s_up,
+                                               title="🤖 System Fair Value")
+                    with cmp_cols[1]:
+                        render_fair_value_card(blended, r_price, upside,
+                                               title="🧮 Your Fair Value")
+
+                    d1, d2, d3 = st.columns(3)
+                    d1.metric("System Fair Value", f"₹{s_fv:,.2f}",
+                              delta=f"{s_up:+.1f}%" if s_up is not None else None)
+                    d2.metric("Manual Fair Value", f"₹{blended:,.2f}",
+                              delta=f"{upside:+.1f}%" if upside is not None else None)
+                    d3.metric("Manual vs System",
+                              f"{gap:+.1f}%" if gap is not None else "—",
+                              delta=("you are more bullish" if (gap or 0) > 0
+                                     else "you are more conservative"),
+                              delta_color="off")
+
+                    if gap is not None and abs(gap) > 30:
+                        st.warning(
+                            f"⚠️ Your valuation differs from the system model by "
+                            f"{abs(gap):.0f}%. Worth checking which assumption drives "
+                            f"the gap — usually the target multiple or the EPS."
+                        )
+
+                    sv = sysres['vals']
+                    render_valuation_box("🤖 System Model Inputs", [
+                        ("Current P/E", f"{sv['trailing_pe']:.2f}x"
+                         if sv.get('trailing_pe') else "N/A"),
+                        ("Industry P/E", f"{sv['industry_pe']:.2f}x"
+                         if sv.get('industry_pe') else "N/A"),
+                        ("EPS (TTM)", f"₹{sv['trailing_eps']:.2f}"
+                         if sv.get('trailing_eps') else "N/A"),
+                        ("System FV (P/E)", f"₹{sv['fair_value_pe']:,.2f}"
+                         if sv.get('fair_value_pe') else "N/A"),
+                        ("System FV (EV/EBITDA)", f"₹{sv['fair_value_ev']:,.2f}"
+                         if sv.get('fair_value_ev') else "N/A"),
+                    ])
+                elif sysres and sysres.get('error'):
+                    st.info(f"🤖 System valuation unavailable: {sysres['error']}")
+
+                # ---- Key metrics cards ------------------------------------
+                st.markdown('<div class="section-header">📊 Key Metrics</div>',
+                            unsafe_allow_html=True)
+                _mkt = (r_price * mv_shares) if (r_price and mv_shares) else None
+                render_metric_cards([
+                    ("💰", f"₹{r_price:,.2f}", "Current Price"),
+                    ("📈", f"{implied_pe(r_price, r_eps):.2f}x"
+                     if implied_pe(r_price, r_eps) else "N/A", "Implied P/E"),
+                    ("💵", f"₹{r_eps:,.2f}" if r_eps else "N/A", "EPS (TTM)"),
+                    ("🏦", f"₹{_mkt:,.0f}Cr" if _mkt else "N/A", "Market Cap"),
+                    ("🎯", f"₹{blended:,.2f}", "Fair Value"),
+                    ("📚", f"{res['t_pe']:.1f}x", "Target P/E"),
+                ])
 
                 if stats['spread_pct'] and stats['spread_pct'] > 150:
                     st.warning(
@@ -5121,11 +5380,68 @@ Thin coverage (under 3 articles) and stale news both scale the score down.
                         f"which methods are the outliers before trusting it."
                     )
 
+                # ---- Charts (gauges + comparison), same layout as system ---
+                st.markdown("---")
+                gc1, gc2 = st.columns(2)
+                with gc1:
+                    st.markdown('<div class="section-header">🎯 Valuation Gauges</div>',
+                                unsafe_allow_html=True)
+                    _pe_fv = methods.get("P/E (reported EPS)")
+                    _pb_fv = methods.get("P/B")
+                    _u1 = ((_pe_fv - r_price) / r_price * 100) if (_pe_fv and r_price) else 0
+                    _u2 = ((_pb_fv - r_price) / r_price * 100) if (_pb_fv and r_price) else 0
+                    st.plotly_chart(create_gauge_chart(_u1, _u2),
+                                    use_container_width=True)
+                    st.caption("Left: P/E method · Right: P/B method")
+                with gc2:
+                    st.markdown('<div class="section-header">📊 Price vs Fair Value</div>',
+                                unsafe_allow_html=True)
+                    cmp_fig = create_manual_comparison_chart(r_price, methods, blended)
+                    if cmp_fig:
+                        st.plotly_chart(cmp_fig, use_container_width=True)
+
+                st.markdown('<div class="section-header">📐 Valuation Range</div>',
+                            unsafe_allow_html=True)
                 ff = create_football_field_chart(methods, r_price, blended)
                 if ff:
                     st.plotly_chart(ff, use_container_width=True)
 
-                st.markdown("##### 📋 Method Breakdown")
+                rng1, rng2, rng3 = st.columns(3)
+                rng1.metric("Range Low", f"₹{stats['min']:,.2f}")
+                rng2.metric("Median", f"₹{stats['median']:,.2f}")
+                rng3.metric("Range High", f"₹{stats['max']:,.2f}")
+
+                st.markdown('<div class="section-header">📋 Valuation Breakdown</div>',
+                            unsafe_allow_html=True)
+                vb1, vb2 = st.columns(2)
+                with vb1:
+                    _pe_fv = methods.get("P/E (reported EPS)")
+                    render_valuation_box("📈 P/E Multiple Method", [
+                        ("Implied P/E at LTP",
+                         f"{implied_pe(r_price, r_eps):.2f}x"
+                         if implied_pe(r_price, r_eps) else "N/A"),
+                        ("Target P/E", f"{res['t_pe']:.2f}x"),
+                        ("EPS (TTM)", f"₹{r_eps:,.2f}" if r_eps else "N/A"),
+                        ("Fair Value (P/E)", f"₹{_pe_fv:,.2f}" if _pe_fv else "N/A"),
+                        ("Upside (P/E)",
+                         f"{(_pe_fv - r_price)/r_price*100:+.2f}%"
+                         if (_pe_fv and r_price) else "N/A"),
+                    ])
+                with vb2:
+                    _pb_fv = methods.get("P/B")
+                    render_valuation_box("📚 P/B Multiple Method", [
+                        ("Book Value / share", f"₹{mv_bvps:,.2f}" if mv_bvps else "N/A"),
+                        ("Target P/B", f"{t_pb:.2f}x"),
+                        ("Implied P/B at LTP",
+                         f"{r_price / mv_bvps:.2f}x" if (mv_bvps and r_price) else "N/A"),
+                        ("Fair Value (P/B)", f"₹{_pb_fv:,.2f}" if _pb_fv else "N/A"),
+                        ("Upside (P/B)",
+                         f"{(_pb_fv - r_price)/r_price*100:+.2f}%"
+                         if (_pb_fv and r_price) else "N/A"),
+                    ])
+
+                st.markdown('<div class="section-header">🧾 All Methods</div>',
+                            unsafe_allow_html=True)
                 mrows = []
                 for name, val in methods.items():
                     mrows.append({
@@ -5230,6 +5546,7 @@ Thin coverage (under 3 articles) and stale news both scale the score down.
 
             if st.button("🔄 Clear result", key="mv_clear"):
                 st.session_state.pop('mv_result', None)
+                st.session_state.pop('mv_system', None)
                 st.rerun()
 
         with st.expander("📖 What each method is good for"):
