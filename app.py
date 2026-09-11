@@ -4765,85 +4765,152 @@ Thin coverage (under 3 articles) and stale news both scale the score down.
     elif mode == "🧮 Manual Valuation":
 
         st.markdown("### 🧮 Manual Valuation Dashboard")
-        st.caption("Enter your own numbers, value the stock eleven ways, and see how much "
-                   "of the answer depends on the multiple rather than the earnings.")
+        st.caption("Enter per-share figures, then value the stock seven ways off the "
+                   "pre-fed industry multiples.")
 
         # ------------------------------------------------------------------
-        # STEP 1 — identify the stock and (optionally) prefill
+        # Widget defaults are seeded into session_state ONCE, and the widgets
+        # below are created with key= only (no value=). This is deliberate:
+        # when a widget has a key that already exists in session_state,
+        # Streamlit uses the stored value and ignores value=. Seeding first
+        # and letting prefill write straight to the widget keys is what makes
+        # the prefill buttons actually move the fields.
         # ------------------------------------------------------------------
-        st.markdown("#### 1️⃣ Stock & Industry")
+        _MV_DEFAULTS = {
+            'mv_price_in': 0.0, 'mv_shares_in': 0.0, 'mv_eps_in': 0.0,
+            'mv_fwd_eps_in': 0.0, 'mv_bvps_in': 0.0, 'mv_dps_in': 0.0,
+        }
+        for _k, _v in _MV_DEFAULTS.items():
+            st.session_state.setdefault(_k, _v)
 
-        c1, c2, c3 = st.columns([2, 2, 1])
-        with c1:
-            mv_ticker = st.text_input(
-                "Ticker (optional)",
-                value=st.session_state.get("mv_ticker_val", ""),
-                placeholder="e.g. RELIANCE.NS",
-                key="mv_ticker"
-            ).strip().upper()
-        with c2:
-            industries = ["— none / use sector default —"] + sorted(get_all_categories())
-            mv_industry = st.selectbox("Industry (drives benchmark multiples)",
+        # ------------------------------------------------------------------
+        # STEP 1 — pick the stock
+        # ------------------------------------------------------------------
+        st.markdown("#### 1️⃣ Select Stock")
+
+        pick_mode = st.radio(
+            "How do you want to choose the stock?",
+            ["🔍 Search the database", "✏️ Type a ticker", "🖊️ Fully manual (no ticker)"],
+            horizontal=True, key="mv_pick_mode"
+        )
+
+        mv_ticker = ""
+        db_hit = None
+
+        if pick_mode == "🔍 Search the database":
+            sc1, sc2 = st.columns([1, 2])
+            with sc1:
+                q = st.text_input("Search name or ticker", placeholder="e.g. reliance, tcs, bank",
+                                  key="mv_db_query").strip()
+            with sc2:
+                if q and len(q) >= 2:
+                    matches = search_stocks_by_name(q, max_results=200)
+                    if matches:
+                        labels = [f"{m['ticker']} — {m['name']}  ·  {m['industry']}"
+                                  for m in matches]
+                        chosen_lbl = st.selectbox(f"{len(matches)} match(es) in the database",
+                                                  labels, key="mv_db_pick")
+                        idx = labels.index(chosen_lbl)
+                        db_hit = matches[idx]
+                        mv_ticker = db_hit['ticker']
+                    else:
+                        st.info(f"No stock in the database matches “{q}”. "
+                                "Use *Type a ticker* if it isn't listed.")
+                else:
+                    st.caption("Type at least 2 characters to search "
+                               f"the {TOTAL_STOCKS:,}-stock database.")
+
+        elif pick_mode == "✏️ Type a ticker":
+            mv_ticker = st.text_input("Ticker", placeholder="e.g. RELIANCE.NS",
+                                      key="mv_ticker_typed").strip().upper()
+            if mv_ticker:
+                db_hit = get_stock_info(mv_ticker)
+                if db_hit:
+                    st.success(f"✅ Found in database: **{db_hit['name']}** "
+                               f"· {db_hit['category']}")
+                else:
+                    st.info("Not in the database — you can still value it, but the "
+                            "industry has to be picked manually below.")
+
+        # ---- Industry + cap (auto-matched from the database when possible) ----
+        industries = ["— none / use sector default —"] + sorted(get_all_categories())
+
+        if db_hit and db_hit.get('category' if 'category' in db_hit else 'industry'):
+            matched = db_hit.get('category') or db_hit.get('industry')
+            if matched in industries and st.session_state.get('mv_last_match') != matched:
+                st.session_state['mv_industry'] = matched
+                st.session_state['mv_last_match'] = matched
+
+        ic1, ic2 = st.columns([3, 1])
+        with ic1:
+            mv_industry = st.selectbox("Industry (drives the benchmark multiples)",
                                        industries, key="mv_industry")
-        with c3:
+        with ic2:
             mv_cap = st.selectbox("Cap", ["Large", "Mid", "Small"], key="mv_cap")
 
-        pf1, pf2 = st.columns([1, 3])
-        with pf1:
-            do_prefill = st.button("⬇️ Prefill from live data", use_container_width=True)
-        with pf2:
-            st.caption("Prefill pulls current figures as a starting point. "
-                       "Every field stays editable — that is the whole point of this screen.")
+        # ---- Prefill ---------------------------------------------------------
+        if pick_mode != "🖊️ Fully manual (no ticker)":
+            p1, p2 = st.columns([1, 3])
+            with p1:
+                do_prefill = st.button("⬇️ Prefill financials",
+                                       use_container_width=True,
+                                       disabled=not mv_ticker)
+            with p2:
+                if mv_ticker:
+                    st.caption(f"Pulls live figures for **{mv_ticker}** as a starting "
+                               "point. Every field stays editable afterwards.")
+                else:
+                    st.caption("Pick a stock above to enable prefill.")
 
-        if do_prefill and mv_ticker:
-            with st.spinner(f"Fetching {mv_ticker}..."):
-                f = None
-                try:
-                    f = get_stock_fundamentals(mv_ticker)
-                except Exception:
-                    f = None
-            if not f:
-                st.warning(f"Could not fetch {mv_ticker}. Enter the numbers manually below.")
-            else:
-                shares_cr = None
-                try:
-                    if f.get('market_cap') and f.get('price'):
-                        shares_cr = (f['market_cap'] / f['price']) / 1e7
-                except Exception:
-                    shares_cr = None
+            if do_prefill and mv_ticker:
+                with st.spinner(f"Fetching {mv_ticker}..."):
+                    try:
+                        f = get_stock_fundamentals(mv_ticker)
+                    except Exception:
+                        f = None
+                if not f:
+                    st.warning(f"Could not fetch {mv_ticker}. Enter the figures manually.")
+                else:
+                    # Write to the WIDGET keys so the inputs visibly update
+                    st.session_state['mv_price_in'] = float(f.get('price') or 0.0)
+                    st.session_state['mv_eps_in'] = float(f.get('trailing_eps') or 0.0)
+                    st.session_state['mv_bvps_in'] = float(f.get('book_value') or 0.0)
 
-                st.session_state['mv_price'] = float(f.get('price') or 0.0)
-                st.session_state['mv_eps'] = float(f.get('trailing_eps') or 0.0)
-                st.session_state['mv_bvps'] = float(f.get('book_value') or 0.0)
-                if shares_cr:
-                    st.session_state['mv_shares'] = round(shares_cr, 2)
-                if f.get('revenue'):
-                    st.session_state['mv_revenue'] = round(f['revenue'] / 1e7, 2)
-                if f.get('ebitda'):
-                    st.session_state['mv_ebitda'] = round(f['ebitda'] / 1e7, 2)
-                if f.get('profit_margin'):
-                    st.session_state['mv_margin'] = round(f['profit_margin'] * 100, 2)
-                if f.get('free_cashflow'):
-                    st.session_state['mv_fcf'] = round(f['free_cashflow'] / 1e7, 2)
-                if f.get('revenue_growth'):
-                    st.session_state['mv_growth'] = round(f['revenue_growth'] * 100, 2)
-                if f.get('enterprise_value') and f.get('market_cap'):
-                    nd = (f['enterprise_value'] - f['market_cap']) / 1e7
-                    st.session_state['mv_netdebt'] = round(nd, 2)
+                    try:
+                        if f.get('market_cap') and f.get('price'):
+                            st.session_state['mv_shares_in'] = round(
+                                (f['market_cap'] / f['price']) / 1e7, 2)
+                    except Exception:
+                        pass
 
-                # Auto-match the industry so benchmarks line up
-                try:
-                    si = get_stock_info(mv_ticker)
-                    if si and si.get('category') in industries:
-                        st.session_state['mv_industry'] = si['category']
-                except Exception:
-                    pass
+                    # Forward EPS implied by the forward P/E, when both are sane
+                    try:
+                        fpe, price = f.get('forward_pe'), f.get('price')
+                        if fpe and price and 0 < fpe < 200:
+                            st.session_state['mv_fwd_eps_in'] = round(price / fpe, 2)
+                    except Exception:
+                        pass
 
-                st.session_state['mv_ticker_val'] = mv_ticker
-                st.success(f"Prefilled from {f.get('name', mv_ticker)}. Adjust anything below.")
-                st.rerun()
+                    # Dividend per share from the yield
+                    try:
+                        dy, price = f.get('dividend_yield'), f.get('price')
+                        if dy and price:
+                            # yfinance has shipped this as both a fraction and a
+                            # percentage; normalise so 2% never becomes 200%.
+                            dyf = dy if dy < 1 else dy / 100.0
+                            st.session_state['mv_dps_in'] = round(price * dyf, 2)
+                    except Exception:
+                        pass
 
-        # Benchmarks for the chosen industry
+                    st.session_state['mv_prefill_note'] = (
+                        f"Prefilled from {f.get('name', mv_ticker)}")
+                    st.session_state.pop('mv_result', None)
+                    st.rerun()
+
+        if st.session_state.get('mv_prefill_note'):
+            st.success(f"✅ {st.session_state.pop('mv_prefill_note')} — adjust anything below.")
+
+        # ---- Benchmarks ------------------------------------------------------
         ind_key = None if mv_industry.startswith("—") else mv_industry
         try:
             bench = get_industry_benchmarks(ind_key or 'Other', mv_cap)
@@ -4853,168 +4920,57 @@ Thin coverage (under 3 articles) and stale news both scale the score down.
         bsrc = "peer average" if bench.get('pe_source') == 'peer' else "pre-fed benchmark"
         st.info(f"📚 **{ind_key or 'Sector default'}** ({mv_cap} cap) — "
                 f"P/E **{bench.get('pe', 0):.1f}** · P/B **{bench.get('pb', 0):.1f}** · "
-                f"EV/EBITDA **{bench.get('ev_ebitda', 0):.1f}** · "
                 f"Target ROE **{bench.get('roe', 0):.1f}%**  ·  source: {bsrc}")
 
         # ------------------------------------------------------------------
-        # STEP 2 — inputs
+        # STEP 2 — Price & Earnings inputs
         # ------------------------------------------------------------------
-        st.markdown("#### 2️⃣ Financial Inputs")
-        st.caption("Money figures in **₹ Crore**, share count in **Crore shares**, "
-                   "per-share figures in **₹**.")
+        st.markdown("#### 2️⃣ Price & Earnings")
+        st.caption("All per-share figures in **₹**; share count in **Crore shares**.")
 
-        t_core, t_rev, t_bs, t_cf = st.tabs(
-            ["📊 Price & Earnings", "📈 Revenue Model", "🏦 Balance Sheet", "💵 Cash Flow & Rates"]
-        )
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            mv_price = st.number_input("Current Price (₹)", min_value=0.0, step=1.0,
+                                       format="%.2f", key="mv_price_in")
+            mv_shares = st.number_input("Shares Outstanding (Cr)", min_value=0.0, step=1.0,
+                                        format="%.2f", key="mv_shares_in",
+                                        help="Optional — used only to show market cap")
+        with a2:
+            mv_eps = st.number_input("Reported EPS — TTM (₹)", step=0.5, format="%.2f",
+                                     key="mv_eps_in",
+                                     help="Actual trailing twelve month EPS")
+            mv_fwd_eps = st.number_input("Estimated EPS — forward (₹)", step=0.5,
+                                         format="%.2f", key="mv_fwd_eps_in",
+                                         help="Your own or consensus forward EPS")
+        with a3:
+            mv_bvps = st.number_input("Book Value / share (₹)", min_value=0.0, step=1.0,
+                                      format="%.2f", key="mv_bvps_in")
+            mv_dps = st.number_input("Dividend / share (₹)", min_value=0.0, step=0.5,
+                                     format="%.2f", key="mv_dps_in")
 
-        with t_core:
-            a1, a2, a3 = st.columns(3)
-            with a1:
-                mv_price = st.number_input("Current Price (₹)", min_value=0.0,
-                                           value=float(st.session_state.get('mv_price', 0.0)),
-                                           step=1.0, format="%.2f", key="mv_price_in")
-                mv_shares = st.number_input("Shares Outstanding (Cr)", min_value=0.0,
-                                            value=float(st.session_state.get('mv_shares', 0.0)),
-                                            step=1.0, format="%.2f", key="mv_shares_in")
-            with a2:
-                mv_eps = st.number_input("Reported EPS — TTM (₹)",
-                                         value=float(st.session_state.get('mv_eps', 0.0)),
-                                         step=0.5, format="%.2f", key="mv_eps_in",
-                                         help="Actual trailing twelve month EPS")
-                mv_fwd_eps = st.number_input("Estimated EPS — forward (₹)",
-                                             value=float(st.session_state.get('mv_fwd_eps', 0.0)),
-                                             step=0.5, format="%.2f", key="mv_fwd_eps_in",
-                                             help="Your own or consensus forward EPS. Leave 0 "
-                                                  "to derive it from the Revenue Model tab.")
-            with a3:
-                mv_bvps = st.number_input("Book Value / share (₹)", min_value=0.0,
-                                          value=float(st.session_state.get('mv_bvps', 0.0)),
-                                          step=1.0, format="%.2f", key="mv_bvps_in")
-                mv_dps = st.number_input("Dividend / share (₹)", min_value=0.0,
-                                         value=float(st.session_state.get('mv_dps', 0.0)),
-                                         step=0.5, format="%.2f", key="mv_dps_in")
+        # Derived context
+        eps_growth = None
+        if mv_eps and mv_fwd_eps and mv_eps > 0:
+            eps_growth = (mv_fwd_eps / mv_eps - 1) * 100
 
-        with t_rev:
-            st.markdown("**Reported vs Estimated revenue → EPS**")
-            st.caption("Use this when you trust a revenue forecast and a margin assumption "
-                       "more than a headline EPS figure. EPS = Revenue × net margin ÷ shares.")
-            b1, b2 = st.columns(2)
-            with b1:
-                st.markdown("*Reported (actual)*")
-                mv_revenue = st.number_input("Reported Revenue — TTM (₹ Cr)", min_value=0.0,
-                                             value=float(st.session_state.get('mv_revenue', 0.0)),
-                                             step=100.0, format="%.2f", key="mv_rev_in")
-                mv_margin = st.number_input("Reported Net Margin (%)",
-                                            value=float(st.session_state.get('mv_margin', 0.0)),
-                                            step=0.5, format="%.2f", key="mv_margin_in")
-            with b2:
-                st.markdown("*Estimated (your forecast)*")
-                mv_est_revenue = st.number_input("Estimated Revenue (₹ Cr)", min_value=0.0,
-                                                 value=float(st.session_state.get('mv_est_revenue', 0.0)),
-                                                 step=100.0, format="%.2f", key="mv_est_rev_in")
-                mv_est_margin = st.number_input("Estimated Net Margin (%)",
-                                                value=float(st.session_state.get('mv_est_margin', 0.0)),
-                                                step=0.5, format="%.2f", key="mv_est_margin_in")
-
-            rep_eps = eps_from_revenue(mv_revenue, mv_margin, mv_shares)
-            est_eps = eps_from_revenue(mv_est_revenue, mv_est_margin, mv_shares)
-
-            d1, d2, d3 = st.columns(3)
-            d1.metric("EPS from reported revenue",
-                      f"₹{rep_eps:,.2f}" if rep_eps is not None else "—")
-            d2.metric("EPS from estimated revenue",
-                      f"₹{est_eps:,.2f}" if est_eps is not None else "—")
-            if rep_eps and est_eps:
-                d3.metric("Implied EPS growth", f"{(est_eps/rep_eps - 1)*100:+.1f}%")
-            else:
-                d3.metric("Implied EPS growth", "—")
-
-            if rep_eps is not None and mv_eps and abs(rep_eps - mv_eps) / max(abs(mv_eps), 0.01) > 0.15:
-                st.warning(
-                    f"⚠️ Revenue-derived EPS (₹{rep_eps:,.2f}) differs from the reported EPS "
-                    f"you entered (₹{mv_eps:,.2f}) by more than 15%. Usually this means the "
-                    f"share count, the margin, or the revenue figure needs a second look — "
-                    f"or there are large one-off items below the operating line."
-                )
-
-            # Default is a constant, NOT derived from est_eps/mv_fwd_eps. A
-            # default computed from inputs that are blank on first render gets
-            # frozen into session state, so the box would stay unticked even
-            # after you filled the revenue in. Precedence is handled in the
-            # calculation below instead: an explicit forward EPS always wins.
-            use_est_for_fwd = st.checkbox(
-                "Use estimated-revenue EPS as the forward EPS",
-                value=True,
-                key="mv_use_est",
-                help="Feeds the Revenue Model into the forward-P/E method. If you type an "
-                     "explicit forward EPS above, that takes precedence over this."
-            )
-
-        with t_bs:
-            e1, e2, e3 = st.columns(3)
-            with e1:
-                mv_ebitda = st.number_input("EBITDA (₹ Cr)", min_value=0.0,
-                                            value=float(st.session_state.get('mv_ebitda', 0.0)),
-                                            step=50.0, format="%.2f", key="mv_ebitda_in")
-            with e2:
-                mv_debt = st.number_input("Total Debt (₹ Cr)", min_value=0.0,
-                                          value=float(st.session_state.get('mv_debt', 0.0)),
-                                          step=50.0, format="%.2f", key="mv_debt_in")
-            with e3:
-                mv_cash = st.number_input("Cash & Equivalents (₹ Cr)", min_value=0.0,
-                                          value=float(st.session_state.get('mv_cash', 0.0)),
-                                          step=50.0, format="%.2f", key="mv_cash_in")
-
-            nd_auto = net_debt(mv_debt, mv_cash)
-            use_manual_nd = st.checkbox("Enter net debt directly instead", key="mv_use_nd")
-            if use_manual_nd:
-                mv_netdebt = st.number_input(
-                    "Net Debt (₹ Cr) — negative means net cash",
-                    value=float(st.session_state.get('mv_netdebt', nd_auto)),
-                    step=50.0, format="%.2f", key="mv_nd_in")
-            else:
-                mv_netdebt = nd_auto
-                st.metric("Net Debt (Debt − Cash)", f"₹{nd_auto:,.2f} Cr",
-                          delta="net cash" if nd_auto < 0 else None, delta_color="normal")
-
-        with t_cf:
-            g1, g2, g3 = st.columns(3)
-            with g1:
-                mv_fcf = st.number_input("Free Cash Flow (₹ Cr)", min_value=0.0,
-                                         value=float(st.session_state.get('mv_fcf', 0.0)),
-                                         step=50.0, format="%.2f", key="mv_fcf_in")
-                mv_growth = st.number_input("Growth Rate — stage 1 (%)",
-                                            value=float(st.session_state.get('mv_growth', 12.0)),
-                                            step=1.0, format="%.2f", key="mv_growth_in")
-            with g2:
-                mv_disc = st.number_input("Discount Rate / Required Return (%)",
-                                          min_value=0.1,
-                                          value=float(st.session_state.get('mv_disc', 13.0)),
-                                          step=0.5, format="%.2f", key="mv_disc_in",
-                                          help="For Indian equities 12–15% is a common range")
-                mv_term_g = st.number_input("Terminal Growth (%)",
-                                            value=float(st.session_state.get('mv_term_g', 5.0)),
-                                            step=0.5, format="%.2f", key="mv_term_g_in",
-                                            help="Must stay below the discount rate")
-            with g3:
-                mv_years = st.slider("DCF Forecast Years", 3, 15, 10, key="mv_years_in")
-                mv_fade = st.checkbox("Fade growth toward terminal", value=True,
-                                      key="mv_fade_in",
-                                      help="Declines stage-1 growth linearly to the terminal "
-                                           "rate instead of dropping off a cliff")
-
-            if mv_term_g >= mv_disc:
-                st.error("⚠️ Terminal growth must be below the discount rate, "
-                         "or the DCF terminal value is mathematically invalid. "
-                         "DCF and DDM will be skipped.")
+        k1, k2, k3 = st.columns(3)
+        if mv_price and mv_shares:
+            k1.metric("Market Cap", f"₹{mv_price * mv_shares:,.0f} Cr")
+        else:
+            k1.metric("Market Cap", "—")
+        k2.metric("Implied EPS growth",
+                  f"{eps_growth:+.1f}%" if eps_growth is not None else "—",
+                  help="Reported EPS to forward EPS. Also drives the PEG method.")
+        k3.metric("Dividend Yield",
+                  f"{mv_dps / mv_price * 100:.2f}%" if (mv_price and mv_dps) else "—")
 
         # ------------------------------------------------------------------
-        # STEP 3 — target multiples
+        # STEP 3 — Target multiples & assumptions
         # ------------------------------------------------------------------
-        st.markdown("#### 3️⃣ Target Multiples")
-        st.caption("Prefilled from the pre-fed industry benchmarks above. Override freely.")
+        st.markdown("#### 3️⃣ Target Multiples & Assumptions")
+        st.caption("Prefilled from the industry benchmarks above. Override freely.")
 
-        h1, h2, h3, h4, h5 = st.columns(5)
+        h1, h2, h3, h4 = st.columns(4)
         with h1:
             t_pe = st.number_input("Target P/E", min_value=0.0,
                                    value=float(round(bench.get('pe', 18.0), 1)),
@@ -5023,225 +4979,258 @@ Thin coverage (under 3 articles) and stale news both scale the score down.
             t_fwd_pe = st.number_input("Forward P/E", min_value=0.0,
                                        value=float(round(bench.get('pe', 18.0) * 0.95, 1)),
                                        step=0.5, format="%.1f", key="mv_t_fpe",
-                                       help="Usually a touch below trailing when earnings grow")
+                                       help="Usually a touch below trailing when "
+                                            "earnings are growing")
         with h3:
             t_pb = st.number_input("Target P/B", min_value=0.0,
                                    value=float(round(bench.get('pb', 2.5), 2)),
                                    step=0.1, format="%.2f", key="mv_t_pb")
         with h4:
-            t_ev = st.number_input("Target EV/EBITDA", min_value=0.0,
-                                   value=float(round(bench.get('ev_ebitda', 12.0), 1)),
-                                   step=0.5, format="%.1f", key="mv_t_ev")
-        with h5:
-            t_ps = st.number_input("Target P/S", min_value=0.0,
-                                   value=float(st.session_state.get('mv_t_ps_v', 2.0)),
-                                   step=0.1, format="%.2f", key="mv_t_ps")
-
-        i1, i2 = st.columns(2)
-        with i1:
             t_peg = st.number_input("Target PEG", min_value=0.0, value=1.0, step=0.1,
                                     format="%.2f", key="mv_t_peg",
-                                    help="PEG of 1 means paying a P/E equal to the growth rate")
-        with i2:
+                                    help="PEG of 1 means paying a P/E equal to "
+                                         "the growth rate")
+
+        j1, j2, j3 = st.columns(3)
+        with j1:
+            mv_disc = st.number_input("Required Return (%)", min_value=0.1, value=13.0,
+                                      step=0.5, format="%.2f", key="mv_disc_in",
+                                      help="Used by Earnings Power and the Dividend "
+                                           "Discount model. 12–15% is a common range "
+                                           "for Indian equities.")
+        with j2:
+            mv_div_g = st.number_input("Dividend Growth (%)", value=5.0, step=0.5,
+                                       format="%.2f", key="mv_div_g_in",
+                                       help="Must stay below the required return")
+        with j3:
             mos = st.slider("Margin of Safety (%)", 0, 50, 15, 5, key="mv_mos",
-                            help="Discount applied to the blended fair value before upside")
+                            help="Discount applied to the blended fair value")
+
+        if mv_div_g >= mv_disc:
+            st.warning("⚠️ Dividend growth must be below the required return, or the "
+                       "Gordon growth formula diverges. The Dividend Discount method "
+                       "will be skipped.")
 
         # ------------------------------------------------------------------
-        # STEP 4 — compute
+        # STEP 4 — Calculate
         # ------------------------------------------------------------------
-        # Precedence: an explicitly typed forward EPS beats the revenue-derived
-        # one, which in turn beats nothing.
-        if mv_fwd_eps and mv_fwd_eps > 0:
-            fwd_eps_used = mv_fwd_eps
-        elif use_est_for_fwd and est_eps:
-            fwd_eps_used = est_eps
-        else:
-            fwd_eps_used = 0.0
-        rev_for_ps = mv_est_revenue if mv_est_revenue else mv_revenue
-        dcf_ok = mv_term_g < mv_disc
+        st.markdown("#### 4️⃣ Calculate")
 
-        methods = {
-            "P/E (reported EPS)":      fv_pe(mv_eps, t_pe),
-            "Forward P/E (est. EPS)":  fv_forward_pe(fwd_eps_used, t_fwd_pe),
-            "Revenue model → P/E":     fv_pe(rep_eps, t_pe),
-            "Est. revenue → P/E":      fv_pe(est_eps, t_pe),
-            "P/B":                     fv_pb(mv_bvps, t_pb),
-            "P/S":                     fv_ps(rev_for_ps, mv_shares, t_ps),
-            "EV/EBITDA":               fv_ev_ebitda(mv_ebitda, t_ev, mv_netdebt, mv_shares),
-            "PEG-implied P/E":         fv_peg(mv_eps, mv_growth, t_peg),
-            "Graham Number":           fv_graham(mv_eps, mv_bvps),
-            "Earnings Power":          fv_earnings_power(mv_eps, mv_disc),
-            "Dividend Discount":       fv_ddm(mv_dps, mv_disc, mv_term_g) if dcf_ok else None,
-            "DCF (FCF)":               fv_dcf(mv_fcf, mv_shares, mv_growth, mv_years,
-                                              mv_term_g, mv_disc, mv_netdebt,
-                                              mv_fade) if dcf_ok else None,
-        }
+        # Snapshot of everything the valuation depends on, so we can tell the
+        # user when the on-screen result no longer matches the inputs.
+        current_sig = (mv_price, mv_eps, mv_fwd_eps, mv_bvps, mv_dps,
+                       t_pe, t_fwd_pe, t_pb, t_peg, mv_disc, mv_div_g,
+                       ind_key, mv_cap)
 
-        DEFAULT_W = {
-            "P/E (reported EPS)": 20, "Forward P/E (est. EPS)": 15,
-            "Revenue model → P/E": 10, "Est. revenue → P/E": 10,
-            "P/B": 10, "P/S": 3, "EV/EBITDA": 12, "PEG-implied P/E": 5,
-            "Graham Number": 3, "Earnings Power": 2, "Dividend Discount": 3,
-            "DCF (FCF)": 17,
-        }
+        cb1, cb2 = st.columns([1, 3])
+        with cb1:
+            calc_clicked = st.button("🧮 Calculate Fair Value", type="primary",
+                                     use_container_width=True)
+        with cb2:
+            stored = st.session_state.get('mv_result')
+            if stored and stored.get('sig') != current_sig:
+                st.warning("⚠️ Inputs have changed since the last calculation — "
+                           "press Calculate to refresh.")
+            elif not stored:
+                st.caption("Fill in a price plus either an EPS or a book value, "
+                           "then press Calculate.")
 
-        st.markdown("#### 4️⃣ Method Weights")
-        with st.expander("⚖️ Adjust how much each method counts", expanded=False):
-            st.caption("Weights are renormalised across whichever methods produced a value, "
-                       "so a method that can't compute simply drops out — it never drags "
-                       "the blend toward zero.")
-            weights = {}
-            wcols = st.columns(3)
-            for n, (name, dflt) in enumerate(DEFAULT_W.items()):
-                with wcols[n % 3]:
-                    # The slider is ALWAYS enabled and always defaults to its
-                    # standard weight. Gating it on whether the method can
-                    # currently compute would be a trap: the widget value is
-                    # remembered in session state, so a slider created at 0
-                    # while the inputs were still blank would stay at 0 after
-                    # you filled them in, and the valuation would never appear.
-                    # Methods that return None are dropped by blend_valuations
-                    # regardless of weight, so there is nothing to gate.
-                    avail = methods.get(name) is not None
-                    weights[name] = st.slider(
-                        f"{name}{'' if avail else '  ·  needs inputs'}",
-                        0, 30, dflt, 1, key=f"mv_w_{n}"
+        if calc_clicked:
+            ddm_ok = mv_div_g < mv_disc
+            methods = {
+                "P/E (reported EPS)":     fv_pe(mv_eps, t_pe),
+                "Forward P/E (est. EPS)": fv_forward_pe(mv_fwd_eps, t_fwd_pe),
+                "P/B":                    fv_pb(mv_bvps, t_pb),
+                "PEG-implied P/E":        fv_peg(mv_eps, eps_growth, t_peg),
+                "Graham Number":          fv_graham(mv_eps, mv_bvps),
+                "Earnings Power":         fv_earnings_power(mv_eps, mv_disc),
+                "Dividend Discount":      (fv_ddm(mv_dps, mv_disc, mv_div_g)
+                                           if ddm_ok else None),
+            }
+            st.session_state['mv_result'] = {
+                'sig': current_sig,
+                'methods': methods,
+                'price': mv_price,
+                'eps': mv_eps,
+                'ticker': mv_ticker or 'MANUAL',
+                'name': (db_hit.get('name') if db_hit else '') or '',
+                'industry': ind_key or 'Sector default',
+                'cap': mv_cap,
+                't_pe': t_pe,
+                't_peg': t_peg,
+                'eps_growth': eps_growth,
+            }
+            st.rerun()
+
+        # ------------------------------------------------------------------
+        # STEP 5 — Results
+        # ------------------------------------------------------------------
+        res = st.session_state.get('mv_result')
+
+        if res:
+            methods = res['methods']
+            r_price = res['price']
+            r_eps = res['eps']
+
+            DEFAULT_W = {
+                "P/E (reported EPS)": 30, "Forward P/E (est. EPS)": 20,
+                "P/B": 18, "PEG-implied P/E": 10, "Graham Number": 8,
+                "Earnings Power": 7, "Dividend Discount": 7,
+            }
+
+            st.markdown("---")
+            st.markdown("#### 5️⃣ Valuation Result")
+
+            with st.expander("⚖️ Method weights", expanded=False):
+                st.caption("Weights are renormalised across whichever methods produced "
+                           "a value, so a method that cannot compute simply drops out — "
+                           "it never drags the blend toward zero.")
+                weights = {}
+                wcols = st.columns(3)
+                for n, (name, dflt) in enumerate(DEFAULT_W.items()):
+                    with wcols[n % 3]:
+                        avail = methods.get(name) is not None
+                        weights[name] = st.slider(
+                            f"{name}{'' if avail else '  ·  needs inputs'}",
+                            0, 40, dflt, 1, key=f"mv_w_{n}")
+
+            blended, eff_w = blend_valuations(methods, weights, mos)
+            stats = valuation_stats(methods)
+
+            if blended is None or not stats:
+                st.info("No method could be computed. Check that you entered a positive "
+                        "EPS with a target P/E, or a book value with a target P/B.")
+            else:
+                upside = ((blended - r_price) / r_price * 100) if r_price else None
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Blended Fair Value", f"₹{blended:,.2f}",
+                          delta=f"{upside:+.1f}% vs LTP" if upside is not None else None)
+                m2.metric("Valuation Range",
+                          f"₹{stats['min']:,.0f} – ₹{stats['max']:,.0f}",
+                          delta=f"{stats['count']} methods", delta_color="off")
+                m3.metric("Median Method", f"₹{stats['median']:,.2f}")
+                m4.metric("Verdict",
+                          get_valuation_tag(upside) if upside is not None else "—")
+
+                if stats['spread_pct'] and stats['spread_pct'] > 150:
+                    st.warning(
+                        f"⚠️ The methods disagree by {stats['spread_pct']:.0f}% "
+                        f"(₹{stats['min']:,.0f} to ₹{stats['max']:,.0f}). A blended "
+                        f"number across a spread this wide is false precision — check "
+                        f"which methods are the outliers before trusting it."
                     )
 
-        blended, eff_w = blend_valuations(methods, weights, mos)
-        stats = valuation_stats(methods)
+                ff = create_football_field_chart(methods, r_price, blended)
+                if ff:
+                    st.plotly_chart(ff, use_container_width=True)
 
-        # ------------------------------------------------------------------
-        # STEP 5 — results
-        # ------------------------------------------------------------------
-        st.markdown("---")
-        st.markdown("#### 5️⃣ Valuation Result")
+                st.markdown("##### 📋 Method Breakdown")
+                mrows = []
+                for name, val in methods.items():
+                    mrows.append({
+                        'Method': name,
+                        'Fair Value': f"₹{val:,.2f}" if val else "n/a",
+                        'Upside %': (f"{(val - r_price)/r_price*100:+.1f}%"
+                                     if val and r_price else "—"),
+                        'Weight': f"{weights.get(name, 0)}",
+                        'Effective': (f"{eff_w.get(name, 0)*100:.1f}%"
+                                      if name in eff_w else "—"),
+                        'Status': "✅ used" if name in eff_w else (
+                            "⚪ zero weight" if val else "❌ inputs missing"),
+                    })
+                st.dataframe(pd.DataFrame(mrows), use_container_width=True,
+                             hide_index=True)
 
-        if blended is None or not stats:
-            st.info("Enter at least a price plus one of: EPS with a target P/E, "
-                    "book value with a target P/B, or EBITDA with a share count.")
-        else:
-            upside = ((blended - mv_price) / mv_price * 100) if mv_price else None
+                # ---- Reverse valuation -------------------------------------
+                st.markdown("##### 🔄 What Today's Price Already Assumes")
+                imp_pe = implied_pe(r_price, r_eps)
+                imp_g = implied_growth_for_pe(r_price, r_eps, res['t_peg'])
+                need_eps = implied_eps_for_price(r_price, res['t_pe'])
+                v1, v2, v3 = st.columns(3)
+                v1.metric("Implied P/E at LTP", f"{imp_pe:,.2f}x" if imp_pe else "—",
+                          delta=f"vs target {res['t_pe']:.1f}x" if imp_pe else None,
+                          delta_color="off")
+                v2.metric(f"Implied growth (PEG {res['t_peg']:.1f})",
+                          f"{imp_g:,.1f}%" if imp_g else "—")
+                v3.metric(f"EPS needed at {res['t_pe']:.1f}x",
+                          f"₹{need_eps:,.2f}" if need_eps else "—",
+                          delta=(f"{(need_eps/r_eps - 1)*100:+.1f}% vs now"
+                                 if need_eps and r_eps else None), delta_color="off")
 
-            r1, r2, r3, r4 = st.columns(4)
-            r1.metric("Blended Fair Value", f"₹{blended:,.2f}",
-                      delta=f"{upside:+.1f}% vs LTP" if upside is not None else None)
-            r2.metric("Valuation Range",
-                      f"₹{stats['min']:,.0f} – ₹{stats['max']:,.0f}",
-                      delta=f"{stats['count']} methods", delta_color="off")
-            r3.metric("Median Method", f"₹{stats['median']:,.2f}")
-            r4.metric("Verdict", get_valuation_tag(upside) if upside is not None else "—")
+                # ---- Scenarios ---------------------------------------------
+                scen = build_scenarios(r_eps, res['t_pe'])
+                if scen:
+                    st.markdown("##### 🎲 Bear / Base / Bull")
+                    st.caption("Flexes the two levers that dominate any equity "
+                               "valuation: the earnings and the multiple paid for them.")
+                    srows = []
+                    for label, sv in scen.items():
+                        fv = sv['eps'] * sv['pe']
+                        srows.append({
+                            'Scenario': label,
+                            'EPS': f"₹{sv['eps']:,.2f}",
+                            'Target P/E': f"{sv['pe']:,.1f}x",
+                            'Fair Value': f"₹{fv:,.2f}",
+                            'Upside %': (f"{(fv - r_price)/r_price*100:+.1f}%"
+                                         if r_price else "—"),
+                        })
+                    st.dataframe(pd.DataFrame(srows), use_container_width=True,
+                                 hide_index=True)
 
-            if stats['spread_pct'] and stats['spread_pct'] > 150:
-                st.warning(
-                    f"⚠️ The methods disagree by {stats['spread_pct']:.0f}% "
-                    f"(₹{stats['min']:,.0f} to ₹{stats['max']:,.0f}). A blended number "
-                    f"across a spread this wide is false precision — look at which "
-                    f"methods are outliers and why before trusting it."
+                # ---- Sensitivity -------------------------------------------
+                if r_eps and res['t_pe']:
+                    st.markdown("##### 🔥 Sensitivity: EPS vs Target P/E")
+                    pe_vals = [round(res['t_pe'] * m, 1)
+                               for m in (0.7, 0.85, 1.0, 1.15, 1.3)]
+                    grid = sensitivity_grid(r_eps, [-30, -15, 0, 15, 30], pe_vals)
+                    if grid:
+                        gdata = []
+                        for row in grid:
+                            d = {'EPS': f"₹{row['eps']:,.2f} ({row['eps_delta']:+.0f}%)"}
+                            for pe, v in zip(pe_vals, row['values']):
+                                d[f"{pe}x"] = f"₹{v:,.0f}" if v else "—"
+                            gdata.append(d)
+                        st.dataframe(pd.DataFrame(gdata), use_container_width=True,
+                                     hide_index=True)
+                        st.caption(f"At the current price of ₹{r_price:,.2f}, every cell "
+                                   f"above it is upside. The width of this table is the "
+                                   f"honest uncertainty in the valuation.")
+
+                # ---- Export -------------------------------------------------
+                st.markdown("---")
+                exp = pd.DataFrame([{
+                    'Ticker': res['ticker'],
+                    'Name': res['name'],
+                    'Industry': res['industry'],
+                    'Cap Type': res['cap'],
+                    'Price': r_price,
+                    'Reported EPS': r_eps,
+                    'EPS Growth %': (round(res['eps_growth'], 2)
+                                     if res['eps_growth'] is not None else None),
+                    'Blended Fair Value': round(blended, 2),
+                    'Upside %': round(upside, 2) if upside is not None else None,
+                    'Margin of Safety %': mos,
+                    'Range Low': round(stats['min'], 2),
+                    'Range High': round(stats['max'], 2),
+                    'Median': round(stats['median'], 2),
+                    'Methods Used': stats['count'],
+                    'Target PE': res['t_pe'],
+                    'Implied PE at LTP': round(imp_pe, 2) if imp_pe else None,
+                    **{f"FV: {k}": (round(v, 2) if v else None)
+                       for k, v in methods.items()}
+                }])
+                st.download_button(
+                    "📥 Download this valuation (CSV)",
+                    data=exp.to_csv(index=False),
+                    file_name=f"NYZTrade_ManualValuation_{res['ticker']}_"
+                              f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv", use_container_width=True
                 )
 
-            # Football field
-            ff = create_football_field_chart(methods, mv_price, blended)
-            if ff:
-                st.plotly_chart(ff, use_container_width=True)
-
-            # Per-method breakdown
-            st.markdown("##### 📋 Method Breakdown")
-            mrows = []
-            for name, val in methods.items():
-                mrows.append({
-                    'Method': name,
-                    'Fair Value': f"₹{val:,.2f}" if val else "n/a",
-                    'Upside %': (f"{(val - mv_price)/mv_price*100:+.1f}%"
-                                 if val and mv_price else "—"),
-                    'Weight': f"{weights.get(name, 0)}",
-                    'Effective': (f"{eff_w.get(name, 0)*100:.1f}%"
-                                  if name in eff_w else "—"),
-                    'Status': "✅ used" if name in eff_w else (
-                        "⚪ zero weight" if val else "❌ inputs missing"),
-                })
-            st.dataframe(pd.DataFrame(mrows), use_container_width=True, hide_index=True)
-
-            # ---- Reverse valuation ----------------------------------------
-            st.markdown("##### 🔄 What Today's Price Already Assumes")
-            imp_pe = implied_pe(mv_price, mv_eps)
-            imp_g = implied_growth_for_pe(mv_price, mv_eps, t_peg)
-            need_eps = implied_eps_for_price(mv_price, t_pe)
-            v1, v2, v3 = st.columns(3)
-            v1.metric("Implied P/E at LTP", f"{imp_pe:,.2f}x" if imp_pe else "—",
-                      delta=f"vs target {t_pe:.1f}x" if imp_pe else None, delta_color="off")
-            v2.metric(f"Implied growth (PEG {t_peg:.1f})",
-                      f"{imp_g:,.1f}%" if imp_g else "—")
-            v3.metric(f"EPS needed at {t_pe:.1f}x",
-                      f"₹{need_eps:,.2f}" if need_eps else "—",
-                      delta=(f"{(need_eps/mv_eps - 1)*100:+.1f}% vs now"
-                             if need_eps and mv_eps else None), delta_color="off")
-
-            # ---- Scenarios -------------------------------------------------
-            sc_eps = mv_eps if mv_eps else (rep_eps or 0)
-            scen = build_scenarios(sc_eps, t_pe)
-            if scen:
-                st.markdown("##### 🎲 Bear / Base / Bull")
-                st.caption("Flexes the two levers that dominate any equity valuation: "
-                           "the earnings and the multiple the market pays for them.")
-                srows = []
-                for label, sv in scen.items():
-                    fv = sv['eps'] * sv['pe']
-                    srows.append({
-                        'Scenario': label,
-                        'EPS': f"₹{sv['eps']:,.2f}",
-                        'Target P/E': f"{sv['pe']:,.1f}x",
-                        'Fair Value': f"₹{fv:,.2f}",
-                        'Upside %': f"{(fv - mv_price)/mv_price*100:+.1f}%" if mv_price else "—",
-                    })
-                st.dataframe(pd.DataFrame(srows), use_container_width=True, hide_index=True)
-
-            # ---- Sensitivity ----------------------------------------------
-            if sc_eps and t_pe:
-                st.markdown("##### 🔥 Sensitivity: EPS vs Target P/E")
-                pe_vals = [round(t_pe * m, 1) for m in (0.7, 0.85, 1.0, 1.15, 1.3)]
-                grid = sensitivity_grid(sc_eps, [-30, -15, 0, 15, 30], pe_vals)
-                if grid:
-                    gdata = []
-                    for row in grid:
-                        d = {'EPS': f"₹{row['eps']:,.2f} ({row['eps_delta']:+.0f}%)"}
-                        for pe, v in zip(pe_vals, row['values']):
-                            d[f"{pe}x"] = f"₹{v:,.0f}" if v else "—"
-                        gdata.append(d)
-                    st.dataframe(pd.DataFrame(gdata), use_container_width=True, hide_index=True)
-                    st.caption(f"At the current price of ₹{mv_price:,.2f}, every cell above "
-                               f"it is upside. The width of this table is the honest "
-                               f"uncertainty in the valuation.")
-
-            # ---- Export ----------------------------------------------------
-            st.markdown("---")
-            exp = pd.DataFrame([{
-                'Ticker': mv_ticker or 'MANUAL',
-                'Industry': ind_key or 'Sector default',
-                'Cap Type': mv_cap,
-                'Price': mv_price,
-                'Blended Fair Value': round(blended, 2),
-                'Upside %': round(upside, 2) if upside is not None else None,
-                'Margin of Safety %': mos,
-                'Range Low': round(stats['min'], 2),
-                'Range High': round(stats['max'], 2),
-                'Median': round(stats['median'], 2),
-                'Methods Used': stats['count'],
-                'Reported EPS': mv_eps,
-                'Forward EPS Used': fwd_eps_used,
-                'Revenue EPS': round(rep_eps, 2) if rep_eps else None,
-                'Est Revenue EPS': round(est_eps, 2) if est_eps else None,
-                'Target PE': t_pe, 'Target PB': t_pb, 'Target EV/EBITDA': t_ev,
-                'Implied PE at LTP': round(imp_pe, 2) if imp_pe else None,
-                **{f"FV: {k}": (round(v, 2) if v else None) for k, v in methods.items()}
-            }])
-            st.download_button(
-                "📥 Download this valuation (CSV)",
-                data=exp.to_csv(index=False),
-                file_name=f"NYZTrade_ManualValuation_{mv_ticker or 'manual'}_"
-                          f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv", use_container_width=True
-            )
+            if st.button("🔄 Clear result", key="mv_clear"):
+                st.session_state.pop('mv_result', None)
+                st.rerun()
 
         with st.expander("📖 What each method is good for"):
             st.markdown("""
@@ -5249,20 +5238,17 @@ Thin coverage (under 3 articles) and stale news both scale the score down.
 |---|---|---|
 | **P/E (reported)** | Stable, profitable companies | EPS is negative or hit by one-offs |
 | **Forward P/E** | Companies with visible earnings growth | Your estimate is wrong |
-| **Revenue model → P/E** | When you trust revenue + margin more than headline EPS | Margin assumption is off |
 | **P/B** | Banks, NBFCs, asset-heavy businesses | Asset-light firms — book value means little |
-| **P/S** | Loss-making or early-stage growth | Ignores whether sales ever become profit |
-| **EV/EBITDA** | Comparing across different debt levels | Capital-intensive firms where D&A is a real cost |
 | **PEG** | Growth companies | No growth, or growth that won't last |
 | **Graham Number** | A conservative floor | Growth companies — it will always look expensive |
 | **Earnings Power** | No-growth cash cows | Any real growth |
 | **Dividend Discount** | High, stable payers (utilities, PSUs) | Low or no dividend |
-| **DCF** | Predictable free cash flow | Terminal value dominates — small input changes swing it hugely |
 
-**The honest caveat:** in a DCF the terminal value is typically 60–80% of the total,
-so the answer is mostly driven by your terminal growth and discount rate. Treat the
-range across methods as the real output, not the single blended number.
+Every method here runs off the six per-share inputs above, so nothing needs a
+balance sheet or a cash flow statement. Treat the **range** across methods as
+the real output, not the single blended number.
             """)
+
 
     elif mode == "📈 Individual Analysis":
         
