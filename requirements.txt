@@ -1,0 +1,58 @@
+# ============================================================================
+# NYZTrade Comprehensive Platform — requirements
+# ----------------------------------------------------------------------------
+# Recommended Python: 3.11 / 3.12   (see runtime.txt)
+# Install:  pip install -r requirements.txt
+#
+# Modes covered: Industry Screener · Earnings + Value Screener ·
+#                News Sentiment Screener · Manual Valuation ·
+#                Individual Analysis · Industry Explorer
+# ============================================================================
+
+# --- Core app framework -----------------------------------------------------
+# 1.36+ needed for:
+#   st.query_params                           -> valuation deep-links
+#   st.column_config.LinkColumn(display_text) -> "Analyze" link column
+#   st.tabs inside a mode branch              -> Manual Valuation input tabs
+streamlit>=1.36.0,<2.0.0
+
+# --- Market data ------------------------------------------------------------
+# Price/fundamentals for every screener, plus the news feed behind the
+# News Sentiment Screener. The news parser handles both the legacy flat
+# schema and the current nested 'content' schema, so either side of the
+# 0.2.55 change works.
+yfinance>=0.2.54
+
+# yfinance dependency from 0.2.55 onward. Declared explicitly because some
+# managed hosts (Streamlit Community Cloud among them) intermittently fail to
+# resolve it transitively, which shows up as empty dataframes or a curl
+# session error rather than a clean ImportError.
+curl_cffi>=0.7.0
+
+# Used directly by the optional NSE board-meeting calendar lookup
+# (_earnings_from_nse). It arrives transitively via yfinance, but the app
+# imports it by name, so it is declared here rather than relied upon.
+requests>=2.31.0
+
+# --- Data handling ----------------------------------------------------------
+# Tested working on both 2.3.3 and 3.0.2.
+pandas>=2.1.0
+numpy>=1.26.0
+
+# --- Charting ---------------------------------------------------------------
+# go.Figure / add_vline / make_subplots — used by the football-field chart,
+# the gauge chart and the valuation comparison charts.
+plotly>=5.18.0
+
+# --- PDF report generation --------------------------------------------------
+# 4.x is the tested line for the SimpleDocTemplate / Table / Paragraph APIs
+# in create_pdf_report().
+reportlab>=4.0.0,<5.0.0
+
+# --- News sentiment: OPTIONAL ----------------------------------------------
+# The sentiment engine ships its own financial lexicon (202 phrases +
+# 215 words) and is fully functional without this package — VADER only
+# contributes general-language tone, at 15% weight. Verified: with
+# vaderSentiment absent the engine still imports and classifies correctly.
+# Pure Python, ~130 KB, no model download. Safe to delete this line.
+vaderSentiment>=3.3.2
